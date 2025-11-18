@@ -1,0 +1,3 @@
+Flask
+mysql-connector-python
+gunicorn  # Necessário para hospedar apps Python
