@@ -1,254 +1,299 @@
-from flask import Flask, render_template, request, redirect, flash
-import mysql.connector
-import random
+import os
+import psycopg2
 from datetime import datetime
-import os 
-import sys 
+from flask import Flask, render_template, request, redirect, url_for, flash, g
 
-# A. Configuração explícita do template folder (necessário para alguns ambientes)
-try:
-    template_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
-    app = Flask(__name__, template_folder=template_dir)
-except NameError:
-    app = Flask(__name__)
-    print("Aviso: Usando a configuração padrão do Flask para a pasta 'templates'.")
+# -----------------------------------------------------------
+# Configuração do Aplicativo e do Banco de Dados
+# -----------------------------------------------------------
 
+app = Flask(__name__, template_folder='.')
 
-# Chave secreta necessária para usar 'flash' (mensagens de erro/sucesso)
-app.secret_key = 'sua_chave_secreta_aqui' 
+app.secret_key = 'super_chave_secreta_e_facil'
 
-# B. Configuração do Banco de Dados
-# ATENÇÃO: Verifique se 'user' e 'password' estão corretos para o seu MySQL
-DB_CONFIG = {
-    "host": "localhost",
-    "user": "root",        
-    "password": "",        
-    "database": "rifa"
-}
+# Lendo a variável de ambiente DATABASE_URL
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
-def get_db_connection():
-    """Cria e retorna uma nova conexão com o banco de dados."""
-    return mysql.connector.connect(**DB_CONFIG)
+# -----------------------------------------------------------
+# Funções de Conexão com PostgreSQL
+# -----------------------------------------------------------
+
+def get_db():
+    if 'db' not in g:
+        if not DATABASE_URL:
+            # Caso de erro no deploy
+            print("ERRO: A variável de ambiente DATABASE_URL não está configurada!")
+            g.db = None
+        else:
+            try:
+                g.db = psycopg2.connect(DATABASE_URL)
+            except psycopg2.Error as e:
+                print(f"Erro ao conectar ao PostgreSQL: {e}")
+                g.db = None
+    return g.db
+
+@app.teardown_appcontext
+def close_db(e=None):
+    db = g.pop('db', None)
+    if db is not None:
+        db.close()
+
+# -----------------------------------------------------------
+# Inicialização do Banco de Dados (Cria a tabela se não existir)
+# -----------------------------------------------------------
+
+def init_db():
+    conn = get_db()
+    if conn is None:
+        return
+        
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS rifas (
+                numero INT PRIMARY KEY,
+                nome VARCHAR(255) NOT NULL,
+                status VARCHAR(50) NOT NULL,
+                data_sorteio TIMESTAMP
+            )
+        """)
+        conn.commit()
+    except psycopg2.Error as e:
+        print(f"Erro ao criar tabela: {e}")
+    finally:
+        cursor.close()
+
+with app.app_context():
+    init_db()
+
+# -----------------------------------------------------------
+# Funções de Dados
+# -----------------------------------------------------------
+
+def get_rifa_data():
+    conn = get_db()
+    if conn is None:
+        return {}, [] 
+
+    cursor = conn.cursor()
+    
+    mapa_rifa = {i: {'status': 'disponivel', 'nome': None, 'data_sorteio': None} for i in range(1, 101)}
+    historico = []
+
+    try:
+        # 1. Busca todos os números
+        cursor.execute("SELECT numero, nome, status, data_sorteio FROM rifas")
+        vendidos = cursor.fetchall()
+        
+        for num, nome, status, data_sorteio in vendidos:
+            mapa_rifa[num] = {'status': status, 'nome': nome, 'data_sorteio': data_sorteio}
+
+        # 2. Busca o histórico de sorteios
+        cursor.execute("SELECT numero, nome, data_sorteio FROM rifas WHERE status = 'sorteado' ORDER BY data_sorteio DESC")
+        historico = cursor.fetchall()
+
+    except psycopg2.Error as e:
+        print(f"Erro ao buscar dados: {e}")
+        
+    finally:
+        cursor.close()
+        
+    return mapa_rifa, historico
+
+# -----------------------------------------------------------
+# Rotas
+# -----------------------------------------------------------
+
 @app.route('/')
 def index():
-    try:
-        db = get_db_connection()
-        cursor = db.cursor()
-        
-        # 1. Obter todos os participantes
-        cursor.execute("SELECT numero, nome FROM participantes ORDER BY numero ASC")
-        participantes = cursor.fetchall()
-        
-        # 2. Obter o histórico de sorteios
-        cursor.execute("SELECT numero_sorteado, nome_ganhador, data_hora FROM historico_sorteios ORDER BY data_hora DESC")
-        historico = cursor.fetchall()
-        
-        # 3. Criar o mapa da rifa (1 a 100) para a grade visual
-        mapa_rifa = {i: {'nome': '', 'status': 'disponivel'} for i in range(1, 101)}
-        
-        # Atualizar status para números vendidos
-        for numero, nome in participantes:
-            mapa_rifa[numero]['nome'] = nome if nome is not None else '' 
-            mapa_rifa[numero]['status'] = 'vendido'
-            
-        # Atualizar status para números sorteados
-        numeros_sorteados = [row[0] for row in historico]
-        for numero in numeros_sorteados:
-            if numero in mapa_rifa:
-                mapa_rifa[numero]['status'] = 'sorteado'
-                # Garante que o nome do ganhador é mostrado
-                for num_sorteado, nome_ganhador, _ in historico:
-                    if num_sorteado == numero:
-                        mapa_rifa[numero]['nome'] = nome_ganhador
-                        break
-                
-        db.close()
-        
-        return render_template('index.html', mapa_rifa=mapa_rifa, historico=historico)
-    
-    except mysql.connector.Error as err:
-        print(f"❌ ERRO CRÍTICO NO BANCO DE DADOS: {err}", file=sys.stderr)
-        flash(f"Erro de conexão: Verifique o MySQL e o DB 'rifa'. Detalhes no console.", 'error')
-        return render_template('index.html', mapa_rifa={i: {'nome': '', 'status': 'disponivel'} for i in range(1, 101)}, historico=[])
+    mapa_rifa, historico = get_rifa_data()
+    return render_template('index.html', mapa_rifa=mapa_rifa, historico=historico)
 
 @app.route('/adicionar', methods=['POST'])
 def adicionar():
-    nome = request.form['nome'].strip()
+    numero = request.form.get('numero')
+    nome = request.form.get('nome').strip()
+    conn = get_db()
+    
+    if not conn:
+        flash('Erro de conexão com o banco de dados.', 'error')
+        return redirect(url_for('index'))
+
+    if not (nome and numero):
+        flash('Nome e número são obrigatórios!', 'error')
+        return redirect(url_for('index'))
+
     try:
-        numero = int(request.form['numero'])
+        numero = int(numero)
+        if not (1 <= numero <= 100):
+            flash('Número da rifa deve ser entre 1 e 100.', 'error')
+            return redirect(url_for('index'))
     except ValueError:
-        flash("O número deve ser um valor inteiro.", 'error')
-        return redirect('/')
+        flash('Número inválido.', 'error')
+        return redirect(url_for('index'))
 
-    if not (1 <= numero <= 100):
-        flash("O número deve estar entre 1 e 100.", 'error')
-        return redirect('/')
+    cursor = conn.cursor()
 
-    db = get_db_connection()
-    cursor = db.cursor()
-    
     try:
-        # A. Verificar se o número já está vendido
-        cursor.execute("SELECT nome FROM participantes WHERE numero = %s", (numero,))
-        if cursor.fetchone():
-            flash(f"O número {numero} já está reservado!", 'error')
-            return redirect('/')
+        cursor.execute("SELECT status FROM rifas WHERE numero = %s", (numero,))
         
-        # B. Verificar se o número já foi sorteado
-        cursor.execute("SELECT id FROM historico_sorteios WHERE numero_sorteado = %s", (numero,))
         if cursor.fetchone():
-            flash(f"O número {numero} já foi sorteado!", 'error')
-            return redirect('/')
-
-        # C. Inserir novo participante
-        cursor.execute("INSERT INTO participantes (nome, numero) VALUES (%s, %s)", (nome, numero))
-        db.commit()
-        flash(f"Participante '{nome}' adicionado com o número {numero}.", 'success')
-    
-    except mysql.connector.Error as err:
-        flash(f"Erro no banco de dados: {err}", 'error')
+            flash(f'O número {numero} já está ocupado ou sorteado!', 'error')
+        else:
+            cursor.execute(
+                "INSERT INTO rifas (numero, nome, status) VALUES (%s, %s, 'vendido')",
+                (numero, nome)
+            )
+            conn.commit()
+            flash(f'Número {numero} registrado para {nome}!', 'success')
+            
+    except psycopg2.Error as e:
+        flash(f'Erro ao adicionar: {e}', 'error')
+        
     finally:
-        db.close()
-        
-    return redirect('/')
+        cursor.close()
+    
+    return redirect(url_for('index'))
 
 @app.route('/sortear')
 def sortear():
-    db = get_db_connection()
-    cursor = db.cursor()
+    conn = get_db()
+    if not conn:
+        flash('Erro de conexão com o banco de dados.', 'error')
+        return redirect(url_for('index'))
+
+    cursor = conn.cursor()
     
     try:
-        # 1. Encontrar todos os números vendidos que AINDA NÃO foram sorteados
-        cursor.execute("""
-            SELECT p.numero, p.nome 
-            FROM participantes p 
-            LEFT JOIN historico_sorteios h ON p.numero = h.numero_sorteado
-            WHERE h.numero_sorteado IS NULL
-        """)
-        
-        candidatos = cursor.fetchall()
-        
-        if not candidatos:
-            flash("Não há números vendidos disponíveis para sortear!", 'warning')
-            return redirect('/')
-        
-        # 2. Sortear um candidato aleatório
-        sorteado_data = random.choice(candidatos)
-        sorteado_numero = sorteado_data[0]
-        sorteado_nome = sorteado_data[1]
-        
-        # 3. Inserir o resultado no histórico
-        query = "INSERT INTO historico_sorteios (numero_sorteado, nome_ganhador) VALUES (%s, %s)"
-        cursor.execute(query, (sorteado_numero, sorteado_nome))
-        db.commit()
-        
-        flash(f"🥳 GANHADOR! Número {sorteado_numero} para {sorteado_nome} foi sorteado e adicionado ao histórico.", 'success')
+        cursor.execute("SELECT numero, nome FROM rifas WHERE status = 'vendido'")
+        vendidos = cursor.fetchall()
 
-    except mysql.connector.Error as err:
-        flash(f"Erro no sorteio: {err}", 'error')
+        if not vendidos:
+            flash('Não há números vendidos disponíveis para sortear!', 'error')
+            return redirect(url_for('index'))
+
+        import random
+        num_sorteado, nome_ganhador = random.choice(vendidos)
+
+        cursor.execute(
+            "UPDATE rifas SET status = 'sorteado', data_sorteio = %s WHERE numero = %s",
+            (datetime.now(), num_sorteado)
+        )
+        conn.commit()
+
+        flash(f'🎉 O NÚMERO SORTEADO É: {num_sorteado}! Ganhador(a): <strong>{nome_ganhador}</strong>!', 'success')
+
+    except psycopg2.Error as e:
+        flash(f'Erro no sorteio: {e}', 'error')
     finally:
-        db.close()
-        
-    return redirect('/')
-# --- ROTAS DE ADMINISTRAÇÃO ---
+        cursor.close()
+
+    return redirect(url_for('index'))
 
 @app.route('/excluir/<int:numero>', methods=['POST'])
 def excluir(numero):
-    """Exclui um número da tabela 'participantes'."""
-    db = get_db_connection()
-    cursor = db.cursor()
-    
-    try:
-        # A. Verifica se o número já foi sorteado antes de excluir
-        cursor.execute("SELECT id FROM historico_sorteios WHERE numero_sorteado = %s", (numero,))
-        if cursor.fetchone():
-            flash(f"O número {numero} já foi sorteado e não pode ser excluído do registro.", 'error')
-            return redirect('/')
-            
-        # B. Exclui o participante
-        cursor.execute("DELETE FROM participantes WHERE numero = %s", (numero,))
-        if cursor.rowcount == 0:
-            flash(f"O número {numero} não foi encontrado para exclusão.", 'error')
-        else:
-            db.commit()
-            flash(f"Número {numero} excluído com sucesso do registro de vendas.", 'success')
-            
-    except mysql.connector.Error as err:
-        flash(f"Erro no banco de dados ao excluir: {err}", 'error')
-    finally:
-        db.close()
+    conn = get_db()
+    if not conn:
+        flash('Erro de conexão com o banco de dados.', 'error')
+        return redirect(url_for('index'))
         
-    return redirect('/')
+    cursor = conn.cursor()
 
+    try:
+        cursor.execute("SELECT status, nome FROM rifas WHERE numero = %s", (numero,))
+        resultado = cursor.fetchone()
+        
+        if not resultado:
+            flash(f'Número {numero} não encontrado!', 'error')
+        else:
+            status, nome = resultado
+            if status == 'sorteado':
+                flash('Não é possível excluir um número que já foi sorteado!', 'error')
+            else:
+                cursor.execute("DELETE FROM rifas WHERE numero = %s", (numero,))
+                conn.commit()
+                flash(f'Número {numero} ({nome}) excluído com sucesso!', 'success')
+                
+    except psycopg2.Error as e:
+        flash(f'Erro ao excluir: {e}', 'error')
+    finally:
+        cursor.close()
+    
+    return redirect(url_for('index'))
 
 @app.route('/editar', methods=['POST'])
 def editar():
-    """Edita o nome e/ou número de um participante existente."""
-    try:
-        # Pega os dados do formulário
-        numero_antigo = int(request.form['numero_antigo'])
-        novo_nome = request.form['novo_nome'].strip()
-        novo_numero = int(request.form['novo_numero'])
-    except ValueError:
-        flash("Erro: Os números devem ser inteiros.", 'error')
-        return redirect('/')
+    numero_antigo = request.form.get('numero_antigo')
+    novo_nome = request.form.get('novo_nome').strip()
+    novo_numero = request.form.get('novo_numero')
+    conn = get_db()
 
-    db = get_db_connection()
-    cursor = db.cursor()
+    if not conn:
+        flash('Erro de conexão com o banco de dados.', 'error')
+        return redirect(url_for('index'))
+
+    if not (novo_nome and novo_numero and numero_antigo):
+        flash('Todos os campos de edição são obrigatórios.', 'error')
+        return redirect(url_for('index'))
     
     try:
-        # 1. Validação do novo número (1 a 100)
+        numero_antigo = int(numero_antigo)
+        novo_numero = int(novo_numero)
         if not (1 <= novo_numero <= 100):
-            flash("O novo número deve estar entre 1 e 100.", 'error')
-            return redirect('/')
-            
-        # 2. Se o número mudou, verificar se o novo número já está ocupado por outro
-        if numero_antigo != novo_numero:
-            cursor.execute("SELECT nome FROM participantes WHERE numero = %s", (novo_numero,))
-            if cursor.fetchone():
-                flash(f"O número {novo_numero} já está ocupado por outro participante.", 'error')
-                return redirect('/')
-        
-        # 3. Atualizar o registro
-        query = "UPDATE participantes SET nome = %s, numero = %s WHERE numero = %s"
-        cursor.execute(query, (novo_nome, novo_numero, numero_antigo))
-        
-        if cursor.rowcount > 0:
-            db.commit()
-            flash(f"Registro do número {numero_antigo} atualizado para {novo_nome} ({novo_numero}).", 'success')
-        else:
-            flash("Erro ao editar: Participante original não encontrado.", 'error')
-            
-    except mysql.connector.Error as err:
-        flash(f"Erro no banco de dados ao editar: {err}", 'error')
-    finally:
-        db.close()
-        
-    return redirect('/')
+            flash('O novo número da rifa deve ser entre 1 e 100.', 'error')
+            return redirect(url_for('index'))
+    except ValueError:
+        flash('Número(s) inválido(s).', 'error')
+        return redirect(url_for('index'))
 
+    cursor = conn.cursor()
+    
+    try:
+        if novo_numero != numero_antigo:
+            cursor.execute("SELECT status FROM rifas WHERE numero = %s", (novo_numero,))
+            if cursor.fetchone():
+                flash(f'O novo número {novo_numero} já está ocupado!', 'error')
+                return redirect(url_for('index'))
+
+        if novo_numero == numero_antigo:
+            cursor.execute(
+                "UPDATE rifas SET nome = %s WHERE numero = %s",
+                (novo_nome, numero_antigo)
+            )
+        else:
+            cursor.execute(
+                "INSERT INTO rifas (numero, nome, status) VALUES (%s, %s, 'vendido')",
+                (novo_numero, novo_nome)
+            )
+            cursor.execute("DELETE FROM rifas WHERE numero = %s", (numero_antigo,))
+
+        conn.commit()
+        flash(f'Número {numero_antigo} alterado para {novo_numero} ({novo_nome}) com sucesso!', 'success')
+        
+    except psycopg2.Error as e:
+        flash(f'Erro ao editar: {e}', 'error')
+    finally:
+        cursor.close()
+    
+    return redirect(url_for('index'))
 
 @app.route('/reset')
-def reset_rifa():
-    """Apaga todos os dados das tabelas de participantes e histórico."""
-    db = get_db_connection()
-    cursor = db.cursor()
+def reset():
+    conn = get_db()
+    if not conn:
+        flash('Erro de conexão com o banco de dados.', 'error')
+        return redirect(url_for('index'))
+        
+    cursor = conn.cursor()
     
     try:
-        # TRUNCATE TABLE apaga todos os dados e reinicia os contadores (AUTO_INCREMENT)
-        cursor.execute("TRUNCATE TABLE participantes")
-        cursor.execute("TRUNCATE TABLE historico_sorteios")
-        db.commit()
-        
-        flash("🎉 REINÍCIO COMPLETO! Todos os números vendidos e o histórico de sorteios foram apagados. A rifa está pronta para recomeçar.", 'success')
-        
-    except mysql.connector.Error as err:
-        flash(f"Erro crítico ao reiniciar a rifa: {err}", 'error')
+        cursor.execute("DELETE FROM rifas")
+        conn.commit()
+        flash('🚨 Rifa totalmente reiniciada! Todos os dados foram apagados.', 'success')
+    except psycopg2.Error as e:
+        flash(f'Erro ao reiniciar: {e}', 'error')
     finally:
-        db.close()
+        cursor.close()
         
-    return redirect('/')
-
-
-if __name__ == '__main__':
-    # Use debug=True apenas em desenvolvimento
-    app.run(debug=True)
+    return redirect(url_for('index'))
