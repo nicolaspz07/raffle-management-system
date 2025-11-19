@@ -7,7 +7,7 @@ from flask import Flask, render_template, request, redirect, url_for, flash, g
 # Configuração do Aplicativo e do Banco de Dados
 # -----------------------------------------------------------
 
-app = Flask(__name__, template_folder='.')
+app = Flask(__name__)
 
 app.secret_key = 'super_chave_secreta_e_facil'
 
@@ -297,3 +297,4 @@ def reset():
         cursor.close()
         
     return redirect(url_for('index'))
+
