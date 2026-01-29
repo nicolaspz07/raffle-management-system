@@ -1,20 +1,33 @@
 # Raffle Management System
 
-## Descrição
-Sistema web simples desenvolvido para praticar lógica de programação e operações CRUD.
+Sistema web desenvolvido para gerenciar uma rifa com controle de participantes, sorteio e histórico.
 
 ## Funcionalidades
-- Cadastro de números de rifa
+- Cadastro de participantes com número da rifa (1 a 100)
 - Edição e exclusão de registros
-- Controle de disponibilidade (até 100 números)
-- Interface simples e funcional
+- Sorteio aleatório com registro de data e ganhador
+- Histórico de sorteios
+- Reset completo da rifa
+- Interface web interativa e responsiva
 
 ## Tecnologias Utilizadas
-- HTML
-- CSS
+- Python
+- Flask
+- PostgreSQL (Neon)
+- HTML5
+- CSS3
 - JavaScript
-- Banco de dados (Neon)
-- Deploy (Railway)
+- Bootstrap
+- Railway (deploy)
+- Gunicorn
 
-## Objetivo
-Projeto desenvolvido com foco em aprendizado prático de desenvolvimento web e manipulação de dados.
+## Conceitos Aplicados
+- CRUD completo
+- Programação Orientada a Objetos (conceitos)
+- Conexão com banco de dados usando variáveis de ambiente
+- SQL parametrizado (prevenção de SQL Injection)
+- Manipulação de DOM e eventos com JavaScript
+- Boas práticas básicas de segurança
+
+## Objetivo do Projeto
+Projeto desenvolvido com foco em aprendizado prático de desenvolvimento web, integração com banco de dados e organização de uma aplicação full stack simples.
