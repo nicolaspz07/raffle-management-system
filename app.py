@@ -9,7 +9,7 @@ from flask import Flask, render_template, request, redirect, url_for, flash, g
 
 app = Flask(__name__)
 
-app.secret_key = 'super_chave_secreta_e_facil'
+app.secret_key = os.environ.get("SECRET_KEY", "dev")
 
 # Lendo a variável de ambiente DATABASE_URL
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -297,4 +297,5 @@ def reset():
         cursor.close()
         
     return redirect(url_for('index'))
+
 
